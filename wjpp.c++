@@ -38,7 +38,7 @@ extern "C" {
 namespace po = boost::program_options;
 namespace fs = std::experimental::filesystem;
 
-void Segment(std::vector<std::string> files, size_t segment_length);
+void segmentate(std::vector<std::string> files, double segment_length);
 
 int open_input(const std::string file);
 void close_input();
@@ -87,42 +87,65 @@ int main(int argn, char** argv) {
 		exit(2);
 	}
 
-    Segment(files, 1000);
+    segmentate(files, 1000);
 }
 
 
-void Segment(std::vector<std::string> files, size_t segment_length) {
+void segmentate(std::vector<std::string> files, double segment_length) {
     // Registry
     av_register_all();
-//    avcodec_register_all();
+    avcodec_register_all();
 
-    std::string outname;
-    unsigned int count(0);
     int ret;
     
     for (auto const &video : files) {
-
-        outname = std::to_string(count++)+"_"+video;
+        size_t fileno(0);
 
         // Open input and output, prepare encoding and decoding
         open_input(video);
-        open_output(outname);
+        open_output(std::to_string(fileno++)+"_"+video);
 
         std::cout << "Opened input and output." << std::endl;
 
         AVFrame* frame = av_frame_alloc();
         AVPacket in_pkt;
 
+        size_t current(0);
+        size_t previous(0);
+        size_t nframes(0);
+
+        for (auto n = 0; n < inctx->nb_streams; n ++) {
+            if (inctx->streams[n]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+                nframes = inctx->streams[n]->nb_frames;
+                break;
+            }
+        }
+        
+        double time_curr(0);
+        double time_prev(0);
+        
         av_init_packet(&in_pkt);
         while (av_read_frame(inctx, &in_pkt) >= 0) {
+            print_percent(current++, previous, nframes);
+
+            // Decode packets until the end of the stream is reached
             if (inavctx[in_pkt.stream_index] != NULL) {
+                time_curr = av_frame_get_best_effort_timestamp(frame);
                 if ((ret = decode_packet(in_pkt.stream_index, &in_pkt, frame)) < 0) {
                     av_strerror(ret, errbuf, 1024);
                     error(__LINE__ - 2, __FILE__);
                     return;
                 }
+
+                // If the elapsed time is larger than the specified length, write the current output file and open the next one
+                if (time_curr - time_prev > segment_length) {
+                    time_prev = time_curr;
+                    close_output();
+                    open_output(std::to_string(fileno++)+"_"+video);
+                }
             }
             else {
+                // Write the final packet out
                 if ((ret = av_interleaved_write_frame(outctx, &in_pkt)) < 0) {
                     av_strerror(ret, errbuf, 1024);
                     error(__LINE__ - 2, __FILE__);

@@ -32,18 +32,18 @@ static std::vector<int> b = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 										0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 										0, 0, 0, 0, 0, 0, 0, 0, 0};
 
-void print_percent(size_t current, size_t previous, size_t total) {
-    if ((double)(current - previous) / (double)total < 0.01) return;
+void print_percent(size_t current, size_t &previous, size_t total) {
+    if ((double)(current - previous) / (double)total < 0.01 && current < total - 1) return;
     else previous = current;
-    
-	double percent = ((double)current/(double)(total - 1))*100.0;
+
+	double percent = ((double)current / (double)(total - 1))*100.0;
 	int idx = (unsigned int)percent - 1 >= 0 ? (unsigned int)percent : 0;
 	if (total == 1 || current > total || percent > 100) return;
 
 	std::string p = std::to_string(int(percent));
 	std::cout << backspace+"\033[38;2;"+std::to_string(r[idx])+";"+std::to_string(g[idx])+";"+std::to_string(b[idx])+"m"+
 	             std::string(3 - p.length(), '0')+p+"%"+res << std::flush;
-	if (percent == 100) {
+	if (percent >= 100) {
 		std::cout << res+"\n" << std::flush;
 	}
 }
