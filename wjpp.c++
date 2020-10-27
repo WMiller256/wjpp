@@ -46,8 +46,8 @@ void close_input();
 int open_output(const std::string file);
 void close_output();
 
-int encode_frame(int idx, AVFrame* frame, int* got_output);
-int decode_packet(int idx, AVPacket* pkt, AVFrame* frame, int* frame_finished);
+int encode_frame(int idx, AVFrame* frame);
+int decode_packet(int idx, AVPacket* pkt, AVFrame* frame);
 
 // FFmpeg API global objects
 AVFormatContext* inctx;
@@ -108,14 +108,15 @@ void Segment(std::vector<std::string> files, size_t segment_length) {
         open_input(video);
         open_output(outname);
 
+        std::cout << "Opened input and output." << std::endl;
+
         AVFrame* frame = av_frame_alloc();
         AVPacket in_pkt;
 
         av_init_packet(&in_pkt);
         while (av_read_frame(inctx, &in_pkt) >= 0) {
             if (inavctx[in_pkt.stream_index] != NULL) {
-                int frame_finished; 
-                if ((ret = decode_packet(in_pkt.stream_index, &in_pkt, frame, &frame_finished)) < 0) {
+                if ((ret = decode_packet(in_pkt.stream_index, &in_pkt, frame)) < 0) {
                     av_strerror(ret, errbuf, 1024);
                     error(__LINE__ - 2, __FILE__);
                     return;
@@ -137,7 +138,7 @@ void Segment(std::vector<std::string> files, size_t segment_length) {
                 do {
                     in_pkt.data = NULL;
                     in_pkt.size = 0;
-                    if ((ret = decode_packet(n, &in_pkt, frame, &frame_finished)) < 0) {
+                    if ((ret = decode_packet(n, &in_pkt, frame)) < 0) {
                         av_strerror(ret, errbuf, 1024);
                         error(__LINE__ - 2, __FILE__);
                         return;
@@ -147,7 +148,7 @@ void Segment(std::vector<std::string> files, size_t segment_length) {
                 // Flush encoder
                 int got_output;
                 do {
-                    if ((ret = encode_frame(n, NULL, &got_output)) < 0) {
+                    if ((ret = encode_frame(n, NULL)) < 0) {
                         av_strerror(ret, errbuf, 1024);
                         error(__LINE__ - 2, __FILE__);
                         return;
@@ -156,7 +157,7 @@ void Segment(std::vector<std::string> files, size_t segment_length) {
             }
         }
 
-        av_free_packet(&in_pkt);
+        av_packet_unref(&in_pkt);
 
         close_input();
         close_output();
@@ -177,7 +178,7 @@ int open_input(const std::string file) {
     if ((ret = avformat_find_stream_info(inctx, NULL)) < 0) {
         av_strerror(ret, errbuf, 1024);
         error(__LINE__ - 2, __FILE__);
-        return ret;        
+        return ret;
     }
 
     return 0;
@@ -215,38 +216,32 @@ int open_output(const std::string file) {
             if ((ret = avcodec_open2(inavctx[n], avcodec_find_decoder(inc->codec_id), NULL)) < 0) {
                 av_strerror(ret, errbuf, 1024);
                 error(__LINE__ - 2, __FILE__);
-                return ret;        
+                return ret;
             }
 
             // Output some information about the input file
-            std::cout << "Pixel format: " << av_get_pix_fmt_name(inavctx[n]->pix_fmt) << std::endl;
-            std::cout << "Size:         " << inavctx[n]->width << " x " << inavctx[n]->height << std::endl;
-            std::cout << "Time base:    {" << inavctx[n]->time_base.num << ", " << inavctx[n]->time_base.den << "}" << std::endl;
-            std::cout << "Gop size:     " << inavctx[n]->gop_size << std::endl;
-            std::cout << "Bit rate:     " << inavctx[n]->bit_rate << std::endl;
+            std::cout << "Input file meta: " << std::endl;
+            std::cout << "    Pixel format: " << av_get_pix_fmt_name(inavctx[n]->pix_fmt) << std::endl;
+            std::cout << "    Size:         " << inavctx[n]->width << " x " << inavctx[n]->height << std::endl;
+            std::cout << "    Time base:    {" << inavctx[n]->time_base.num << ", " << inavctx[n]->time_base.den << "}" << std::endl;
+            std::cout << "    Gop size:     " << inavctx[n]->gop_size << std::endl;
+            std::cout << "    Bit rate:     " << inavctx[n]->bit_rate << std::endl;
 
             // Set up video encoder
             AVCodec* encoder = avcodec_find_encoder_by_name("rawvideo");
             AVStream* outstream = avformat_new_stream(outctx, encoder); 
 
             avcodec_parameters_from_context(outstream->codecpar, inavctx[n]);
-
             outavctx[n] = avcodec_alloc_context3(encoder);
 
             // Copy output parameters from output stream to output context
             avcodec_parameters_to_context(outavctx[n], outstream->codecpar);
             outavctx[n]->time_base = inavctx[n]->time_base; // Since AVCodecParameters struct has no time_base member
 
-            std::cout << "Pixel format: " << av_get_pix_fmt_name(outavctx[n]->pix_fmt) << std::endl;
-            std::cout << "Size:         " << outavctx[n]->width << " x " << outavctx[n]->height << std::endl;
-            std::cout << "Time base:    {" << outavctx[n]->time_base.num << ", " << outavctx[n]->time_base.den << "}" << std::endl;
-            std::cout << "Gop size:     " << outavctx[n]->gop_size << std::endl;
-            std::cout << "Bit rate:     " << outavctx[n]->bit_rate << std::endl;
-
             if ((ret = avcodec_open2(outavctx[n], encoder, NULL)) < 0) {
                 av_strerror(ret, errbuf, 1024);
                 error(__LINE__ - 2, __FILE__);
-                return ret;        
+                return ret;
             }
         }
         else if (inc->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -258,7 +253,7 @@ int open_output(const std::string file) {
     if ((ret = avformat_write_header(outctx, NULL)) < 0) {
         av_strerror(ret, errbuf, 1024);
         error(__LINE__ - 2, __FILE__);
-        return ret;        
+        return ret;
     }
 
     return 0;
@@ -279,48 +274,65 @@ void close_output() {
     avformat_free_context(outctx);
 }
 
-int encode_frame(int idx, AVFrame* frame, int* got_output) {
+int encode_frame(int idx, AVFrame* frame) {
     AVPacket out_pkt;
     int ret;
 
-    av_init_packet(&out_pkt);
-    if ((ret = avcodec_encode_video2(outavctx[idx], &out_pkt, frame, got_output)) < 0) {
+    if ((ret = avcodec_send_frame(outavctx[idx], frame)) < 0) {
         av_strerror(ret, errbuf, 1024);
         error(__LINE__ - 2, __FILE__);
-        return ret;        
+        return ret;
     }
 
-    if (*got_output) {
+    av_init_packet(&out_pkt);
+    while (ret >= 0) {
+        ret = avcodec_receive_packet(outavctx[idx], &out_pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return 0;
+        else if (ret < 0) {
+            av_strerror(ret, errbuf, 1024);
+            error(__LINE__ - 2, __FILE__);
+            return ret;
+        }
+
         out_pkt.stream_index = idx;
         if ((ret = av_interleaved_write_frame(outctx, &out_pkt)) < 0) {
             av_strerror(ret, errbuf, 1024);
             error(__LINE__ - 2, __FILE__);
-            return ret;        
+            return ret;
         }
     }
 
     // Free packet
-    av_free_packet(&out_pkt);
+    av_packet_unref(&out_pkt);
 
     return 0;
 }
 
-int decode_packet(int idx, AVPacket* pkt, AVFrame* frame, int* frame_finished) {
+int decode_packet(int idx, AVPacket* pkt, AVFrame* frame) {
     int ret;
-    
-    if ((ret = avcodec_decode_video2(inavctx[idx], frame, frame_finished, pkt)) < 0) {        
+
+    if ((ret = avcodec_send_packet(inavctx[idx], pkt)) < 0) {
         av_strerror(ret, errbuf, 1024);
         error(__LINE__ - 2, __FILE__);
-        return ret;        
+        return ret;
     }
 
-    if (*frame_finished) {
-        int has_output;
+    while (ret >= 0) {
+        ret = avcodec_receive_frame(inavctx[idx], frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return 0;
+        else if (ret < 0) {
+            av_strerror(ret, errbuf, 1024);
+            error(__LINE__ - 2, __FILE__);
+            return ret;
+        }
 
-        frame->pts = frame->pkt_pts;
-        return encode_frame(idx, frame, &has_output);
+        if ((ret = encode_frame(idx, frame)) < 0) {
+            av_strerror(ret, errbuf, 1024);
+            error(__LINE__ - 2, __FILE__);
+            return ret;
+        }
     }
-    else return 0;
+
 }
 
 
