@@ -47,7 +47,7 @@ int open_output(const std::string file);
 void close_output();
 
 int encode_frame(int idx, AVFrame* frame);
-int decode_packet(int idx, AVPacket* pkt, AVFrame* frame);
+int decode_packet(int idx, AVPacket* pkt, AVFrame* frame, size_t &time);
 
 // FFmpeg API global objects
 AVFormatContext* inctx;
@@ -121,8 +121,8 @@ void segmentate(std::vector<std::string> files, double segment_length) {
             }
         }
         
-        double time_curr(0);
-        double time_prev(0);
+        size_t time_curr(0);
+        size_t time_prev(0);
         
         av_init_packet(&in_pkt);
         while (av_read_frame(inctx, &in_pkt) >= 0) {
@@ -130,8 +130,7 @@ void segmentate(std::vector<std::string> files, double segment_length) {
 
             // Decode packets until the end of the stream is reached
             if (inavctx[in_pkt.stream_index] != NULL) {
-                time_curr = av_frame_get_best_effort_timestamp(frame);
-                if ((ret = decode_packet(in_pkt.stream_index, &in_pkt, frame)) < 0) {
+                if ((ret = decode_packet(in_pkt.stream_index, &in_pkt, frame, time_curr)) < 0) {
                     av_strerror(ret, errbuf, 1024);
                     error(__LINE__ - 2, __FILE__);
                     return;
@@ -161,7 +160,7 @@ void segmentate(std::vector<std::string> files, double segment_length) {
                 do {
                     in_pkt.data = NULL;
                     in_pkt.size = 0;
-                    if ((ret = decode_packet(n, &in_pkt, frame)) < 0) {
+                    if ((ret = decode_packet(n, &in_pkt, frame, time_curr)) < 0) {
                         av_strerror(ret, errbuf, 1024);
                         error(__LINE__ - 2, __FILE__);
                         return;
@@ -204,6 +203,35 @@ int open_input(const std::string file) {
         return ret;
     }
 
+    for (auto n = 0; n < inctx->nb_streams; n ++) {
+        AVStream* instream = inctx->streams[n];
+        AVCodecContext* inc = instream->codec;
+        if (inc->codec_type == AVMEDIA_TYPE_VIDEO) {
+            // Set up video decoder
+            inavctx[n] = avcodec_alloc_context3(inc->codec);
+            avcodec_copy_context(inavctx[n], inc);
+            inavctx[n]->time_base = instream->codec->time_base;
+
+            if ((ret = avcodec_open2(inavctx[n], avcodec_find_decoder(inc->codec_id), NULL)) < 0) {
+                av_strerror(ret, errbuf, 1024);
+                error(__LINE__ - 2, __FILE__);
+                return ret;
+            }
+
+            // Output some information about the input file
+            std::cout << "Input file meta: " << std::endl;
+            std::cout << "    Pixel format: " << av_get_pix_fmt_name(inavctx[n]->pix_fmt) << std::endl;
+            std::cout << "    Size:         " << inavctx[n]->width << " x " << inavctx[n]->height << std::endl;
+            std::cout << "    Time base:    {" << inavctx[n]->time_base.num << ", " << inavctx[n]->time_base.den << "}" << std::endl;
+            std::cout << "    Gop size:     " << inavctx[n]->gop_size << std::endl;
+            std::cout << "    Bit rate:     " << inavctx[n]->bit_rate << std::endl;
+        }
+        else if (inc->codec_type == AVMEDIA_TYPE_AUDIO) {
+            avformat_new_stream(outctx, inc->codec);
+            inavctx[n] = outavctx[n] = NULL;
+        }
+    }
+
     return 0;
 }
 
@@ -228,28 +256,7 @@ int open_output(const std::string file) {
 
     // Select video stream from input
     for (auto n = 0; n < inctx->nb_streams; n ++) {
-        AVStream* instream = inctx->streams[n];
-        AVCodecContext* inc = instream->codec;
-        if (inc->codec_type == AVMEDIA_TYPE_VIDEO) {
-            // Set up video decoder
-            inavctx[n] = avcodec_alloc_context3(inc->codec);
-            avcodec_copy_context(inavctx[n], inc);
-            inavctx[n]->time_base = instream->codec->time_base;
-
-            if ((ret = avcodec_open2(inavctx[n], avcodec_find_decoder(inc->codec_id), NULL)) < 0) {
-                av_strerror(ret, errbuf, 1024);
-                error(__LINE__ - 2, __FILE__);
-                return ret;
-            }
-
-            // Output some information about the input file
-            std::cout << "Input file meta: " << std::endl;
-            std::cout << "    Pixel format: " << av_get_pix_fmt_name(inavctx[n]->pix_fmt) << std::endl;
-            std::cout << "    Size:         " << inavctx[n]->width << " x " << inavctx[n]->height << std::endl;
-            std::cout << "    Time base:    {" << inavctx[n]->time_base.num << ", " << inavctx[n]->time_base.den << "}" << std::endl;
-            std::cout << "    Gop size:     " << inavctx[n]->gop_size << std::endl;
-            std::cout << "    Bit rate:     " << inavctx[n]->bit_rate << std::endl;
-
+        if (inctx->streams[n]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
             // Set up video encoder
             AVCodec* encoder = avcodec_find_encoder_by_name("rawvideo");
             AVStream* outstream = avformat_new_stream(outctx, encoder); 
@@ -267,8 +274,8 @@ int open_output(const std::string file) {
                 return ret;
             }
         }
-        else if (inc->codec_type == AVMEDIA_TYPE_AUDIO) {
-            avformat_new_stream(outctx, inc->codec);
+        else if (inctx->streams[n]->codec->codec_type == AVMEDIA_TYPE_AUDIO) {
+            avformat_new_stream(outctx, inctx->streams[n]->codec->codec);
             inavctx[n] = outavctx[n] = NULL;
         }
     }
@@ -331,7 +338,7 @@ int encode_frame(int idx, AVFrame* frame) {
     return 0;
 }
 
-int decode_packet(int idx, AVPacket* pkt, AVFrame* frame) {
+int decode_packet(int idx, AVPacket* pkt, AVFrame* frame, size_t &time) {
     int ret;
 
     if ((ret = avcodec_send_packet(inavctx[idx], pkt)) < 0) {
@@ -348,6 +355,8 @@ int decode_packet(int idx, AVPacket* pkt, AVFrame* frame) {
             error(__LINE__ - 2, __FILE__);
             return ret;
         }
+
+        time = av_frame_get_best_effort_timestamp(frame);
 
         if ((ret = encode_frame(idx, frame)) < 0) {
             av_strerror(ret, errbuf, 1024);
