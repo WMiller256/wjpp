@@ -15,8 +15,10 @@
 #include <iomanip>
 #include <string>
 
+extern char errbuf[1024];
+
 const std::string backspace({8, 8, 8, 8});
 
 void print_percent(size_t current, size_t &previous, size_t total);
+void error(const int line, const char* file);
 std::string datetime();
-std::string type2str(int type);

@@ -21,8 +21,11 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
 #include <libavformat/avformat.h>
-#include <libavutil/timestamp.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
+#include <libavutil/samplefmt.h>
+#include <libavutil/timestamp.h>
 #include <libswscale/swscale.h>
 }
 
@@ -30,11 +33,29 @@ extern "C" {
 #include <boost/program_options.hpp>
 
 #include "colors.h"
+#include "iocustom.h"
 
 namespace po = boost::program_options;
 namespace fs = std::experimental::filesystem;
 
-void Segment(std::vector<std::string> files);
+void Segment(std::vector<std::string> files, size_t segment_length);
+
+int open_input(const std::string file);
+void close_input();
+
+int open_output(const std::string file);
+void close_output();
+
+int encode_frame(int idx, AVFrame* frame, int* got_output);
+int decode_packet(int idx, AVPacket* pkt, AVFrame* frame, int* frame_finished);
+
+// FFmpeg API global objects
+AVFormatContext* inctx;
+AVFormatContext* outctx;
+AVCodecContext* inavctx[16];
+AVCodecContext* outavctx[16];
+
+char errbuf[1024];
 
 int main(int argn, char** argv) {
     std::vector<std::string> files;
@@ -66,101 +87,240 @@ int main(int argn, char** argv) {
 		exit(2);
 	}
 
-    Segment(files);
+    Segment(files, 1000);
 }
 
 
-void Segment(std::vector<std::string> files) {
-    // Allocation and registry
-    frame = av_frame_alloc();
-    decframe = av_frame_alloc();
+void Segment(std::vector<std::string> files, size_t segment_length) {
+    // Registry
     av_register_all();
-    avcodec_register_all();
+//    avcodec_register_all();
+
+    std::string outname;
+    unsigned int count(0);
+    int ret;
     
     for (auto const &video : files) {
-        if ((ret = avformat_open_input(&informat_ctx, video.c_str(), NULL, NULL)) < 0) {
-        	// If opening fails print error message and exit
-        	char errbuf[1024];
-        	av_strerror(ret, errbuf, 1024);
-            std::cout << "Could not open file "+yellow << video << res+": " << errbuf << std::endl;
-            exit(-1);
-        }
 
-        // Read the meta data 
-        ret = avformat_find_stream_info(informat_ctx, 0);
-        if (ret < 0) {
-            std::cout << red << "Failed to read input file information. " << res << std::endl;
-            exit(-1);
-        }
+        outname = std::to_string(count++)+"_"+video;
 
-        for(int ii = 0; ii < informat_ctx->nb_streams; ii ++) {
-            if (informat_ctx->streams[ii]->codec->codec_type == AVMEDIA_TYPE_VIDEO && video_stream < 0) {
-                video_stream = ii;
+        // Open input and output, prepare encoding and decoding
+        open_input(video);
+        open_output(outname);
+
+        AVFrame* frame = av_frame_alloc();
+        AVPacket in_pkt;
+
+        av_init_packet(&in_pkt);
+        while (av_read_frame(inctx, &in_pkt) >= 0) {
+            if (inavctx[in_pkt.stream_index] != NULL) {
+                int frame_finished; 
+                if ((ret = decode_packet(in_pkt.stream_index, &in_pkt, frame, &frame_finished)) < 0) {
+                    av_strerror(ret, errbuf, 1024);
+                    error(__LINE__ - 2, __FILE__);
+                    return;
+                }
+            }
+            else {
+                if ((ret = av_interleaved_write_frame(outctx, &in_pkt)) < 0) {
+                    av_strerror(ret, errbuf, 1024);
+                    error(__LINE__ - 2, __FILE__);
+                    return;
+                }
             }
         }
-        if (video_stream == -1) {
-            std::cout << "Could not find stream index." << std::endl;
-            exit(-1);
-        }
 
-        instream = informat_ctx->streams[video_stream];
-        in_codec = avcodec_find_decoder(instream->codec->codec_id);
-        if (in_codec == NULL) {
-            std::cout << "Could not find codec: " << avcodec_get_name(instream->codec->codec_id) << std::endl;
-            exit(1);
-        }
-        else std::cout << "Detected codec: " << avcodec_get_name(instream->codec->codec_id) << std::endl;
-        std::cout << "File format:  " << informat_ctx->iformat->name << std::endl;
-        std::cout << "Pixel format: " << av_get_pix_fmt_name(instream->codec->pix_fmt) << std::endl;
-        inav_ctx = instream->codec;
+        for (auto n = 0; n < inctx->nb_streams; n ++) {
+            if (inavctx[n]) {
+                // Flush decoder
+                int frame_finished;
+                do {
+                    in_pkt.data = NULL;
+                    in_pkt.size = 0;
+                    if ((ret = decode_packet(n, &in_pkt, frame, &frame_finished)) < 0) {
+                        av_strerror(ret, errbuf, 1024);
+                        error(__LINE__ - 2, __FILE__);
+                        return;
+                    }
+                } while (frame_finished);
 
-        // Open the input codec
-        avcodec_open2(inav_ctx, in_codec, NULL);
-
-        // Allocate destination frame buffer
-        std::vector<uint8_t> framebuf(avpicture_get_size(inav_ctx->pix_fmt, inav_ctx->width, inav_ctx->height));
-        avpicture_fill(reinterpret_cast<AVPicture*>(frame), framebuf.data(), AV_PIX_FMT_BGR24, instream->codec->width, instream->codec->height);
-                       
-        SwsContext* swsctx = sws_getContext(inav_ctx->width, inav_ctx->height, instream->codec->pix_fmt, inav_ctx->width, 
-                                            inav_ctx->height, AV_PIX_FMT_BGR24, SWS_BICUBIC, NULL, NULL, NULL);
-        size_t nframes = instream->nb_frames;
-        frames.reserve(nframes);    // Minimize memcpy
-        
-        size_t current(0);
-        size_t previous(0);
-
-        // Packet initialization
-        AVPacket pkt;
-        av_init_packet(&pkt);
-
-        // Parsing loop
-        while (ret == 0) {
-
-            // Print progress
-            print_percent(current++, previous, nframes);
-
-            ret = av_read_frame(informat_ctx, &pkt);
-            avcodec_decode_video2(instream->codec, decframe, &valid_frame, &pkt);
-
-            // Ignore invalid frames
-            if (!valid_frame) continue;
-
-            // Frame extraction
-            if (ret == 0) {                                              
-                sws_scale(swsctx, decframe->data, decframe->linesize, 0, decframe->height, frame->data, frame->linesize);
-
-                // Convert the decoded frame into a cv::Mat
-                cv::Mat _frame(decframe->height, decframe->width, CV_8UC3, framebuf.data());
-                frames.push_back(_frame.clone());   // Have to use .clone() otherwise each element in [frames] will reference the same object
+                // Flush encoder
+                int got_output;
+                do {
+                    if ((ret = encode_frame(n, NULL, &got_output)) < 0) {
+                        av_strerror(ret, errbuf, 1024);
+                        error(__LINE__ - 2, __FILE__);
+                        return;
+                    }
+                } while (got_output);
             }
         }
-        print_percent(nframes-1, nframes);
 
-        // Free memory and close streams
-        av_frame_free(&decframe);
-        av_frame_free(&frame);
-        sws_freeContext(swsctx);
-        avcodec_close(inav_ctx);
-        avformat_close_input(&informat_ctx);
+        av_free_packet(&in_pkt);
+
+        close_input();
+        close_output();
+
+        return;
     }
 }
+
+int open_input(const std::string file) {
+    int ret;
+
+    if ((ret = avformat_open_input(&inctx, file.c_str(), NULL, NULL))) {
+        av_strerror(ret, errbuf, 1024);
+        error(__LINE__ - 2, __FILE__);
+        return ret;
+    }
+
+    if ((ret = avformat_find_stream_info(inctx, NULL)) < 0) {
+        av_strerror(ret, errbuf, 1024);
+        error(__LINE__ - 2, __FILE__);
+        return ret;        
+    }
+
+    return 0;
+}
+
+void close_input() {
+    for (auto n = 0; n < inctx->nb_streams; n++) {
+        avcodec_close(inavctx[n]);
+        avcodec_free_context(&inavctx[n]);
+    }
+    avformat_close_input(&inctx);
+}
+
+int open_output(const std::string file) {
+    int ret;
+
+    outctx = avformat_alloc_context();
+    outctx->oformat = av_guess_format(NULL, file.c_str(), NULL);
+    if ((ret = avio_open2(&outctx->pb, file.c_str(), AVIO_FLAG_WRITE, NULL, NULL)) < 0) {
+        av_strerror(ret, errbuf, 1024);
+        error(__LINE__ - 2, __FILE__);
+        return ret;
+    }
+
+    // Select video stream from input
+    for (auto n = 0; n < inctx->nb_streams; n ++) {
+        AVStream* instream = inctx->streams[n];
+        AVCodecContext* inc = instream->codec;
+        if (inc->codec_type == AVMEDIA_TYPE_VIDEO) {
+            // Set up video decoder
+            inavctx[n] = avcodec_alloc_context3(inc->codec);
+            avcodec_copy_context(inavctx[n], inc);
+            inavctx[n]->time_base = instream->codec->time_base;
+
+            if ((ret = avcodec_open2(inavctx[n], avcodec_find_decoder(inc->codec_id), NULL)) < 0) {
+                av_strerror(ret, errbuf, 1024);
+                error(__LINE__ - 2, __FILE__);
+                return ret;        
+            }
+
+            // Output some information about the input file
+            std::cout << "Pixel format: " << av_get_pix_fmt_name(inavctx[n]->pix_fmt) << std::endl;
+            std::cout << "Size:         " << inavctx[n]->width << " x " << inavctx[n]->height << std::endl;
+            std::cout << "Time base:    {" << inavctx[n]->time_base.num << ", " << inavctx[n]->time_base.den << "}" << std::endl;
+            std::cout << "Gop size:     " << inavctx[n]->gop_size << std::endl;
+            std::cout << "Bit rate:     " << inavctx[n]->bit_rate << std::endl;
+
+            // Set up video encoder
+            AVCodec* encoder = avcodec_find_encoder_by_name("rawvideo");
+            AVStream* outstream = avformat_new_stream(outctx, encoder); 
+
+            avcodec_parameters_from_context(outstream->codecpar, inavctx[n]);
+
+            outavctx[n] = avcodec_alloc_context3(encoder);
+
+            // Copy output parameters from output stream to output context
+            avcodec_parameters_to_context(outavctx[n], outstream->codecpar);
+            outavctx[n]->time_base = inavctx[n]->time_base; // Since AVCodecParameters struct has no time_base member
+
+            std::cout << "Pixel format: " << av_get_pix_fmt_name(outavctx[n]->pix_fmt) << std::endl;
+            std::cout << "Size:         " << outavctx[n]->width << " x " << outavctx[n]->height << std::endl;
+            std::cout << "Time base:    {" << outavctx[n]->time_base.num << ", " << outavctx[n]->time_base.den << "}" << std::endl;
+            std::cout << "Gop size:     " << outavctx[n]->gop_size << std::endl;
+            std::cout << "Bit rate:     " << outavctx[n]->bit_rate << std::endl;
+
+            if ((ret = avcodec_open2(outavctx[n], encoder, NULL)) < 0) {
+                av_strerror(ret, errbuf, 1024);
+                error(__LINE__ - 2, __FILE__);
+                return ret;        
+            }
+        }
+        else if (inc->codec_type == AVMEDIA_TYPE_AUDIO) {
+            avformat_new_stream(outctx, inc->codec);
+            inavctx[n] = outavctx[n] = NULL;
+        }
+    }
+
+    if ((ret = avformat_write_header(outctx, NULL)) < 0) {
+        av_strerror(ret, errbuf, 1024);
+        error(__LINE__ - 2, __FILE__);
+        return ret;        
+    }
+
+    return 0;
+}
+
+void close_output() {
+    // Write output
+    av_write_trailer(outctx);
+
+    // Close all the streams
+    for (int n = 0; n < outctx->nb_streams; n ++) {
+        if (outctx->streams[n]->codec) {
+            avcodec_close(outctx->streams[n]->codec);
+        }
+    }
+
+    // Free the memory
+    avformat_free_context(outctx);
+}
+
+int encode_frame(int idx, AVFrame* frame, int* got_output) {
+    AVPacket out_pkt;
+    int ret;
+
+    av_init_packet(&out_pkt);
+    if ((ret = avcodec_encode_video2(outavctx[idx], &out_pkt, frame, got_output)) < 0) {
+        av_strerror(ret, errbuf, 1024);
+        error(__LINE__ - 2, __FILE__);
+        return ret;        
+    }
+
+    if (*got_output) {
+        out_pkt.stream_index = idx;
+        if ((ret = av_interleaved_write_frame(outctx, &out_pkt)) < 0) {
+            av_strerror(ret, errbuf, 1024);
+            error(__LINE__ - 2, __FILE__);
+            return ret;        
+        }
+    }
+
+    // Free packet
+    av_free_packet(&out_pkt);
+
+    return 0;
+}
+
+int decode_packet(int idx, AVPacket* pkt, AVFrame* frame, int* frame_finished) {
+    int ret;
+    
+    if ((ret = avcodec_decode_video2(inavctx[idx], frame, frame_finished, pkt)) < 0) {        
+        av_strerror(ret, errbuf, 1024);
+        error(__LINE__ - 2, __FILE__);
+        return ret;        
+    }
+
+    if (*frame_finished) {
+        int has_output;
+
+        frame->pts = frame->pkt_pts;
+        return encode_frame(idx, frame, &has_output);
+    }
+    else return 0;
+}
+
+

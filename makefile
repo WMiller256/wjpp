@@ -39,9 +39,11 @@ YELLOW  = \033[33m
 RED     = \033[91m
 
 #Source files
-OBJS   = $(BUILD)/wjpp.o
+OBJS   = $(BUILD)/wjpp.o \
+         $(BUILD)/iocustom.o
 
-SRCS   = wjpp.c++
+SRCS   = wjpp.c++ \
+         iocustom.c++
 
 #Builds
 all: $(OBJS)
