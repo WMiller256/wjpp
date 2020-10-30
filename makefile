@@ -8,7 +8,7 @@ RM       = /bin/rm -f
 MV       = /bin/mv -f
 CFLAGS   = -isystem /usr/local/include/opencv4/ -I /usr/local/include/eigen3/ -I /usr/lib/boost -Wno-deprecated-declarations -g -std=c++17 -rdynamic \
            -pthread -O3 -fopenmp
-CC       = /usr/bin/c++ $(CFLAGS)
+CC       = /usr/bin/g++ $(CFLAGS)
 
            # OpenCV
 LIBS =     -lopencv_gapi -lopencv_stitching -lopencv_aruco -lopencv_bgsegm -lopencv_bioinspired    \
