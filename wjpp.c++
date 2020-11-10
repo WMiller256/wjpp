@@ -134,6 +134,11 @@ void segmentate(std::vector<std::string> files, std::vector<std::time_t> startti
     int ret;
     
     for (unsigned int ii = 0; ii < files.size(); ii ++) {        
+        if (!fs::exists(fs::path(files[ii]))) {
+            std::cout << "File "+yellow+files[ii]+res+" does not exist.\n" << std::flush;
+            return;
+        }
+        
         // Open input and output, prepare encoding and decoding
         open_input(files[ii]);
         open_output(starttimes[ii], files[ii]);
