@@ -9,11 +9,12 @@
 
 #pragma once
 
-#include <colors.h>
 #include <ctime>
 #include <iostream>
 #include <iomanip>
 #include <string>
+
+#include "colors.h"
 
 extern char errbuf[1024];
 
